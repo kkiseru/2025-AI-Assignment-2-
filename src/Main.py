@@ -484,12 +484,12 @@ def main():
             screen.blit(speed_text, (10, 165))
         
         # Strategy info
-        strategy_text = pygame.font.Font(None, 28).render("Strategy: A* Algorithm, Least Steps to Nearest Target (Treasure Priority)", True, COLORS['text'])
+        strategy_text = pygame.font.Font(None, 28).render("Strategy: A* Algorithm, Shortest path to Nearest Target (Treasure Priority)", True, COLORS['text'])
         screen.blit(strategy_text, (10, 90))
         
         instructions = [
             "SPACE: Auto-play/Pause",
-            "LEFT/RIGHT ARROWS: Step through path",
+            "UP/DOWN ARROWS: Step through path by path",
             "R: Reset to start"
         ]
 
