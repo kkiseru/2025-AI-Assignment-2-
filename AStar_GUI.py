@@ -12,19 +12,19 @@ FPS = 60
 
 # Color palette for different cell types and visual states
 COLORS = {
-    'background': (20, 20, 30),           # Dark background for contrast
-    'path': (255, 255, 255),              # White for walkable cells
-    'blocked': (40, 40, 50),              # Dark gray for blocked cells
-    'start': (0, 255, 0),                 # Green for start position
-    'treasure': (255, 165, 0),            # Orange for treasure locations
-    'obstacle': (128, 128, 128),          # Gray for impassable obstacles
-    'trap': (147, 112, 219),              # Purple for all trap types
-    'reward': (64, 224, 208),             # Turquoise for all reward types
-    'current_path': (255, 0, 0),          # Red for current position
-    'visited_once': (100, 150, 255),      # Light blue for single visits
-    'visited_multiple': (0, 100, 150),    # Dark blue for multiple visits
-    'jump_path': (255, 100, 0),           # Orange for jump movements
-    'text': (255, 255, 255)               # White text color
+    'background':         (20, 20, 30),         # Dark background for contrast
+    'path':               (255, 255, 255),      # White for walkable cells
+    'blocked':            (40, 40, 50),         # Dark gray for blocked cells
+    'start':              (0, 255, 0),          # Green for start position
+    'treasure':           (255, 165, 0),        # Orange for treasure locations
+    'obstacle':           (128, 128, 128),      # Gray for impassable obstacles
+    'trap':               (147, 112, 219),      # Purple for all trap types
+    'reward':             (64, 224, 208),       # Turquoise for all reward types
+    'current_path':       (255, 0, 0),          # Red for current position
+    'visited_once':       (100, 150, 255),      # Light blue for single visits
+    'visited_multiple':   (0, 100, 150),        # Dark blue for multiple visits
+    'jump_path':          (255, 100, 0),        # Orange for jump movements
+    'text':               (255, 255, 255)       # White text color
 }
 
 class HexGrid:
@@ -52,16 +52,14 @@ class HexGrid:
         
         self.offset_x = (WINDOW_WIDTH - total_width) // 2
         self.offset_y = (WINDOW_HEIGHT - total_height) // 2
-        
+    
     def hex_to_pixel(self, row, col):
-   
-       # Convert grid coordinates to screen pixel coordinates.
+        # Convert grid coordinates to screen pixel coordinates.
         x = self.offset_x + col * self.horizontal_spacing + self.hex_width // 2
         y = self.offset_y + row * self.vertical_spacing + self.hex_height // 2
         return int(x), int(y)
     
     def draw_hexagon(self, surface, center_x, center_y, color, border_color=None):
-
         # Render a flat-top hexagon at specified center position.
         points = []
         # Generate 6 vertices starting from right side, counter-clockwise
@@ -199,7 +197,7 @@ class TreasureHuntAStar:
     5. Teleport trap with directional movement logic
     """
     def __init__(self, grid_data):
-       # Initialize the A* solver with world data.
+        # Initialize the A* solver with world data.
         self.grid = grid_data
         self.rows = len(grid_data)
         self.cols = len(grid_data[0])
@@ -295,13 +293,16 @@ class TreasureHuntAStar:
 
         # Gravity traps exponentially increase energy consumption
         # Each gravity trap doubles the energy needed
-        energy_multiplier = 2 ** gravity_level
+        if gravity_level >= 0:
+            energy_multiplier = 2 ** gravity_level  # Normal penalty
+        else:
+            energy_multiplier = 1.0 / (2 ** abs(gravity_level))
         # Speed effects modify the number of steps required# | Positive speed_level (from traps) increases steps | Negative speed_level (from rewards) decreases steps
         if speed_level >= 0:
             step_multiplier = 2 ** speed_level
         else:
             step_multiplier = 1.0 / (2 ** abs(speed_level))
-        
+
         return self.BASE_COST * energy_multiplier * step_multiplier
     
     def heuristic(self, row, col, remaining_treasures):
@@ -397,7 +398,7 @@ class TreasureHuntAStar:
                         continue  # Skip this move - leads to impossible state
                 elif cell == '⊞':    # Gravity reward - decreases energy consumption
                     if (nr, nc) not in used_rewards:  # One-time use
-                        new_grav = max(0, new_grav - 1)
+                        new_grav -= 1
                         new_used_rewards = used_rewards | {(nr, nc)}
                 elif cell == '⊠':    # Speed reward - decreases steps needed
                     if (nr, nc) not in used_rewards:  # One-time use
@@ -410,22 +411,23 @@ class TreasureHuntAStar:
                     rem_set.remove((nr, nc))
                     new_remaining = tuple(sorted(rem_set))
 
-                # Handle teleport trap (⊗) - moves 2 cells in movement direction
+                # Handle teleport trap (⊗) - moves 2 cells back
                 if cell == '⊗':
-                    # Calculate movement direction from previous position
-                    dr = nr - row
-                    dc = nc - col
+                    # First, we need to get the path up to the current position
+                    current_state = (nr, nc, remaining, grav_level, speed_level, used_rewards)
+                    path_to_current = []
+                    st = current_state
+                    while st:
+                        path_to_current.append((st[0], st[1]))  # Extract position coordinates
+                        st = parent.get(st)
+                    path_to_current.reverse()
                     
-                    # Teleport destination: 2 cells away from trap in same direction
-                    final_r, final_c = nr + 2*dr, nc + 2*dc
-                    
-                    # Validate teleport destination
-                    if (final_r < 0 or final_r >= self.rows or final_c < 0 or final_c >= self.cols or
-                        self.grid[final_r][final_c] == 'O' or self.grid[final_r][final_c] == 0):
-                        continue  # Invalid teleport destination
-                    
-                    # Update position to teleport destination
-                    nr, nc = final_r, final_c
+                    # Find current position in path
+                    current_index = len(path_to_current) - 1
+                    if current_index >= 2:  # Can go back at least 2 steps
+                        nr, nc = path_to_current[current_index - 2]
+                    else:  # Can't go back 2 steps, just stay
+                        nr, nc = row, col
                     
                     # Process effects at teleport destination
                     dest_cell = self.grid[nr][nc]
@@ -441,14 +443,14 @@ class TreasureHuntAStar:
                         if new_remaining:
                             continue  # Treasure removal at teleport destination
                     elif dest_cell == '⊞' and (nr, nc) not in new_used_rewards:
-                        new_grav = max(0, new_grav - 1)
+                        new_grav -= 1
                         new_used_rewards = new_used_rewards | {(nr, nc)}
                     elif dest_cell == '⊠' and (nr, nc) not in new_used_rewards:
                         new_speed = max(0, new_speed - 1)
                         new_used_rewards = new_used_rewards | {(nr, nc)}
                 
                 # Calculate movement cost using CURRENT state levels (before effects)
-                move_cost = self.calculate_movement_cost(grav_level, speed_level)
+                move_cost = self.calculate_movement_cost(new_grav, new_speed)
                 
                 # Track jump moves for visualization
                 if is_jump:
@@ -493,18 +495,18 @@ def main():
     - Includes legend for understanding cell types
     """
     grid = [
-        [   0,   1,   0,   1,   0,   1,   0,   1,   0,   1   ],
-        [  'S',  0,   1,   0,  '⊞',  0,   1,   0,   1,   0   ],
-        [   0,  '⊕',  0,  '⊘',  0,   1,   0,   1,   0,   1   ],
-        [   1,   0,   1,   0,  'T',  0,  '⊗',  0,  'O',  0   ],
-        [   0,   1,   0,   1,   0,   1,   0,  '⊠',  0,   1   ],
-        [   1,   0,  'O',  0,  'O',  0,   1,   0,  '⊖',  0   ],
-        [   0,  '⊞',  0,  'O',  0,  '⊗',  0,  'T',  0,  'T'  ],
-        [  'O',  0,   1,   0,   1,   0,  'O',  0,   1,   0   ],
-        [   0,   1,   0,  'T',  0,   1,   0,  'O',  0,   1   ],
-        [   1,   0,  '⊕',  0,  'O',  0,  'O',  0,   1,   0   ],
-        [   0,   1,   0,   1,   0,  '⊠',  0,   1,   0,   1   ],
-        [   1,   0,   1,   0,   1,   0,   1,   0,   1,   0   ],
+        [   0,        1,        0,        1,        0,        1,        0,        1,        0,        1   ],
+        [  'S',       0,        1,        0,       '⊞',      0,        1,        0,        1,        0   ],
+        [   0,       '⊕',      0,       '⊘',      0,        1,        0,        1,        0,        1   ],
+        [   1,        0,        1,        0,       'T',       0,       '⊗',      0,       'O',       0   ],
+        [   0,        1,        0,        1,        0,        1,        0,       '⊠',      0,        1   ],
+        [   1,        0,       'O',       0,       'O',       0,        1,        0,       '⊖',      0   ],
+        [   0,       '⊞',      0,       'O',       0,       '⊗',      0,       'T',       0,       'T'  ],
+        [  'O',       0,        1,        0,        1,        0,       'O',       0,        1,        0   ],
+        [   0,        1,        0,       'T',       0,        1,        0,       'O',       0,        1   ],
+        [   1,        0,       '⊕',      0,       'O',       0,       'O',       0,        1,        0   ],
+        [   0,        1,        0,        1,        0,       '⊠',      0,        1,        0,        1   ],
+        [   1,        0,        1,        0,        1,        0,        1,        0,        1,        0   ],
     ]
     
     # Initialize Pygame display system
@@ -523,7 +525,7 @@ def main():
     # Display solution results in console
     if solution_path:
         print(f"SUCCESS! Collected all {len(solver.treasures)} treasures!")
-        print(f"Path length: {len(solution_path)}, Total cost: {(total_cost-1.5):.2f}")
+        print(f"Path length: {len(solution_path)}, Total cost: {(total_cost)}")
         print("Path coordinates:", solution_path)
     else:
         print("FAILED! Could not collect all treasures - no valid path found!")
@@ -568,7 +570,31 @@ def main():
         # Display solution information
         if solution_path:
             step_text = font.render(f"PATH: {current_step}/{len(solution_path) - 1}", True, COLORS['text'])
-            cost_text = font.render(f"COST: {(total_cost- 1.5):.1f}", True, COLORS['text'])
+
+            # Compute current cost up to current_step
+            gravity_level = 0
+            speed_level = 0
+            used_rewards = set()
+            current_cost = 0.0
+            for i in range(1, current_step + 1):
+                r, c = solution_path[i]
+                cell = grid[r][c]
+                move_cost = solver.calculate_movement_cost(gravity_level, speed_level)
+                current_cost += move_cost
+
+                # Apply trap/reward effects AFTER cost is calculated
+                if cell == '⊖':
+                    gravity_level += 1
+                elif cell == '⊕':
+                    speed_level += 1
+                elif cell == '⊞' and (r, c) not in used_rewards:
+                    gravity_level -= 1
+                    used_rewards.add((r, c))
+                elif cell == '⊠' and (r, c) not in used_rewards:
+                    speed_level -= 1
+                    used_rewards.add((r, c))
+
+            cost_text = font.render(f"COST: {current_cost}", True, COLORS['text'])
             screen.blit(step_text, (10, 10))
             screen.blit(cost_text, (10, 50))
         
