@@ -1,447 +1,517 @@
 import pygame
-import sys
-import time
 import heapq
-from math import inf, sqrt, cos, sin, pi
+import math
+from math import inf, cos, sin, pi
 
-# -----------------------------
-# 1. Define the hexagonal grid and parameters
-# -----------------------------
-
-# Hexagonal grid dimensions (10 columns x 6 rows)
-COLS, ROWS = 10, 6
-
-# Element positions (col, row) - 1-based indexing
-POSITIONS = {
-    'treasures': [(4, 5), (5, 2), (8, 4), (10, 4)],
-    'obstacles': [(1, 4), (3, 3), (4, 4), (5, 3), (5, 5), (7, 4), (7, 5), (8, 5), (9, 2)],
-    'rewards': {
-        (2, 4): 1, 
-        (5, 1): 1,
-        (6, 6): 2,
-        (8, 3): 2
-    },
-    'traps': {
-        (2, 2): 2,
-        (3, 5): 2,
-        (4, 2): 4,
-        (6, 4): 3,
-        (7, 2): 3,
-        (9, 3): 1
-    },
-    'start': (1, 1)
-}
-
-# Create grid representation (flipped 180 degrees)
-grid = [[ '.' for _ in range(COLS)] for _ in range(ROWS)]
-
-# Convert to 0-based indexing and populate grid (FLIPPED 180 degrees)
-# Flip both row and column coordinates
-start = (ROWS - POSITIONS['start'][1], COLS - POSITIONS['start'][0])
-grid[start[0]][start[1]] = 'S'
-
-for col, row in POSITIONS['treasures']:
-    flipped_row = ROWS - row
-    flipped_col = COLS - col
-    grid[flipped_row][flipped_col] = 'T'
-
-for col, row in POSITIONS['obstacles']:
-    flipped_row = ROWS - row
-    flipped_col = COLS - col
-    grid[flipped_row][flipped_col] = '#'
-
-for (col, row), typ in POSITIONS['rewards'].items():
-    flipped_row = ROWS - row
-    flipped_col = COLS - col
-    grid[flipped_row][flipped_col] = '⊠'
-
-for (col, row), typ in POSITIONS['traps'].items():
-    flipped_row = ROWS - row
-    flipped_col = COLS - col
-    if typ == 1:
-        grid[flipped_row][flipped_col] = '⊖'
-    elif typ == 2:
-        grid[flipped_row][flipped_col] = '⊕'
-    elif typ == 3:
-        grid[flipped_row][flipped_col] = '⊗'
-    elif typ == 4:
-        grid[flipped_row][flipped_col] = ''
-
-# Locate all treasures (for pathfinding)
-treasures = []
-for i in range(ROWS):
-    for j in range(COLS):
-        if grid[i][j] == 'T':
-            treasures.append((i, j))
-treasures = tuple(sorted(treasures))
-
-# Debug: Print grid and treasures
-print("Grid layout (180° flipped):")
-for i, row in enumerate(grid):
-    print(f"Row {i}: {' '.join(row)}")
-print(f"Start position: {start}")
-print(f"Treasures found: {treasures}")
-
-# -----------------------------
-# 2. Hexagonal neighbor calculation (FIXED for flat-top orientation)
-# -----------------------------
-def get_hex_neighbors(row, col):
-    """Get valid hexagonal neighbors using odd-r offset coordinates (flat-top hexagons)"""
-    neighbors = []
-    
-    # Hexagonal directions for flat-top hexagons (odd-r offset coordinates)
-    if col % 2 == 1:  # Odd column (offset down)
-        directions = [
-            (-1, -1), (-1, 0), (0, -1), (0, 1), (1, -1), (1, 0)
-        ]
-    else:  # Even column (no offset)
-        directions = [
-            (-1, 0), (-1, 1), (0, -1), (0, 1), (1, 0), (1, 1)
-        ]
-    
-    for dr, dc in directions:
-        nr, nc = row + dr, col + dc
-        if 0 <= nr < ROWS and 0 <= nc < COLS:
-            neighbors.append((nr, nc))
-    
-    return neighbors
-
-# -----------------------------
-# 3. Heuristic (Manhattan + MST) - IMPROVED
-# -----------------------------
-def heuristic(r, c, remaining):
-    """Admissible heuristic: Distance to nearest treasure + MST of remaining treasures."""
-    if not remaining:
-        return 0
-    
-    rem_list = list(remaining)
-    
-    # 1) Distance to nearest treasure (using hex distance approximation)
-    def hex_distance(r1, c1, r2, c2):
-        # Convert to cube coordinates for proper hex distance
-        x1 = c1 - (r1 - (r1 & 1)) // 2
-        z1 = r1
-        y1 = -x1 - z1
-        
-        x2 = c2 - (r2 - (r2 & 1)) // 2
-        z2 = r2
-        y2 = -x2 - z2
-        
-        return (abs(x1 - x2) + abs(y1 - y2) + abs(z1 - z2)) // 2
-    
-    dists = [hex_distance(r, c, tr[0], tr[1]) for tr in rem_list]
-    h0 = min(dists)
-    
-    # 2) MST cost among remaining treasures
-    mst_cost = 0
-    if len(rem_list) > 1:
-        visited = {rem_list[0]}
-        not_visited = set(rem_list[1:])
-        
-        # Precompute pairwise distances
-        dist_map = {}
-        for a in rem_list:
-            for b in rem_list:
-                if a != b:
-                    dist_map[(a, b)] = hex_distance(a[0], a[1], b[0], b[1])
-        
-        # Prim's algorithm for MST
-        while not_visited:
-            cand = inf
-            next_node = None
-            for v in visited:
-                for nv in not_visited:
-                    d = dist_map[(v, nv)]
-                    if d < cand:
-                        cand = d
-                        next_node = nv
-            if next_node is not None:
-                mst_cost += cand
-                visited.add(next_node)
-                not_visited.remove(next_node)
-            else:
-                break
-    
-    return h0 + mst_cost
-
-# -----------------------------
-# 4. A* Search Implementation (FIXED)
-# -----------------------------
-def a_star():
-    start_state = (start[0], start[1], treasures, 0, 0)
-    open_heap = [(heuristic(start[0], start[1], treasures), 0, start_state)]
-    best_cost = {start_state: 0}
-    parent = {start_state: None}
-    
-    goal_state = None
-    nodes_explored = 0
-
-    while open_heap:
-        f, g, state = heapq.heappop(open_heap)
-        r, c, rem, grav, spd = state
-        nodes_explored += 1
-        
-        # Goal check
-        if not rem:
-            goal_state = state
-            print(f"Goal found! Nodes explored: {nodes_explored}")
-            break
-            
-        # Skip if a better cost was found
-        if g > best_cost.get(state, inf):
-            continue
-            
-        # Expand neighbors using proper hexagonal movement
-        for nr, nc in get_hex_neighbors(r, c):
-            sym = grid[nr][nc]
-            
-            # Obstacle check
-            if sym == '#':
-                continue
-                
-            # Base move cost
-            energy_cost = 2 ** grav
-            time_cost = 2 ** spd
-            move_cost = energy_cost + time_cost
-            new_grav, new_spd = grav, spd
-            new_rem = rem
-            extra_cost = 0
-            
-            # Apply cell effects
-            if sym == '⊞':  # Trap 1 (gravity)
-                new_grav += 1
-            elif sym == '⊗':  # Trap 2 (speed)
-                new_spd += 1
-            elif sym == '⊕':  # Reward 1 (gravity)
-                new_grav = max(0, new_grav - 1)
-            elif sym == '⊠':  # Reward 2 (speed)
-                new_spd = max(0, new_spd - 1)
-            elif sym == '⊘':  # Trap 3 (spring) - FIXED
-                # Calculate spring direction (same as movement direction)
-                dr, dc = nr - r, nc - c
-                fr, fc = nr + dr, nc + dc
-                
-                # Validate forced move
-                if 0 <= fr < ROWS and 0 <= fc < COLS and grid[fr][fc] != '#':
-                    extra_cost = move_cost
-                    nr, nc = fr, fc
-                    sym = grid[nr][nc]
-                    # Reapply effect at landing
-                    if sym == '⊞': 
-                        new_grav += 1
-                    elif sym == '⊗': 
-                        new_spd += 1
-                    elif sym == '⊕': 
-                        new_grav = max(0, new_grav - 1)
-                    elif sym == '⊠': 
-                        new_spd = max(0, new_spd - 1)
-                else:
-                    continue  # Can't make the spring move
-            elif sym == '⊖' and rem:  # Trap 4 (block if treasures remain)
-                continue
-                
-            # Treasure collection
-            if sym == 'T' and (nr, nc) in rem:
-                temp = set(rem)
-                temp.remove((nr, nc))
-                new_rem = tuple(sorted(temp))
-                
-            # Calculate new cost and state
-            new_g = g + move_cost + extra_cost
-            new_state = (nr, nc, new_rem, new_grav, new_spd)
-            
-            if new_g < best_cost.get(new_state, inf):
-                best_cost[new_state] = new_g
-                parent[new_state] = state
-                heapq.heappush(open_heap, (new_g + heuristic(nr, nc, new_rem), new_g, new_state))
-
-    # Reconstruct path
-    path = []
-    if goal_state:
-        curr = goal_state
-        total_cost = best_cost[goal_state]
-        while curr:
-            path.append((curr[0], curr[1]))
-            curr = parent[curr]
-        path.reverse()
-        print(f"Path found with total cost: {total_cost}")
-        print(f"Path length: {len(path)} steps")
-    else:
-        print("No path found!")
-    
-    return path
-
-# Compute path with A*
-print("Computing path...")
-the_path = a_star()
-print(f"Computed path: {the_path}")
-
-# -----------------------------
-# 5. Hexagonal Visualization with Pygame (IMPROVED)
-# -----------------------------
+# Initialize Pygame for graphics rendering
 pygame.init()
+# Display window configuration constants
+WINDOW_WIDTH = 1200
+WINDOW_HEIGHT = 600
+FPS = 60
 
-# Hexagon parameters - flat-top orientation (matching matplotlib)
-hex_radius = 30
-hex_width = 2 * hex_radius * cos(pi/6)  # Flat-to-flat width  
-hex_height = 2 * hex_radius  # Point-to-point height
-
-# Calculate window size with margins
-margin = hex_radius
-win_width = int(COLS * hex_width + 2 * margin)
-win_height = int((ROWS + 0.5) * hex_height + 2 * margin)
-screen = pygame.display.set_mode((win_width, win_height))
-pygame.display.set_caption("Hexagonal Treasure Hunt (180° Flipped)")
-clock = pygame.time.Clock()
-
-# Colors - improved visibility
-BACKGROUND = (240, 248, 255)  # Light blue background
-color_map = {
-    '.': (255, 255, 255),  # Empty (white)
-    '#': (64, 64, 64),     # Obstacle (dark grey)
-    '⊖': (128, 0, 128),    # Trap 1 (purple)
-    '⊕': (128, 0, 128),    # Trap 2 (magenta)
-    '⊗': (128, 0, 128),    # Trap 3 (dark magenta)
-    '⊘': (128, 0, 128),     # Trap 4 (indigo)
-    '⊞': (0, 255, 255),    # Reward 1 (cyan)
-    '⊠': (0, 255, 255),    # Reward 2 (deep sky blue)
-    'T': (255, 215, 0),    # Treasure (gold)
-    'S': (0, 128, 0),      # Start (green)
+# Color palette for different cell types and visual states
+COLORS = {
+    'background': (20, 20, 30),           # Dark background for contrast
+    'path': (255, 255, 255),              # White for walkable cells
+    'blocked': (40, 40, 50),              # Dark gray for blocked cells
+    'start': (0, 255, 0),                 # Green for start position
+    'treasure': (255, 165, 0),            # Orange for treasure locations
+    'obstacle': (128, 128, 128),          # Gray for impassable obstacles
+    'trap': (147, 112, 219),              # Purple for all trap types
+    'reward': (64, 224, 208),             # Turquoise for all reward types
+    'current_path': (255, 0, 0),          # Red for current position
+    'visited_once': (100, 150, 255),      # Light blue for single visits
+    'visited_multiple': (0, 100, 150),    # Dark blue for multiple visits
+    'jump_path': (255, 100, 0),           # Orange for jump movements
+    'text': (255, 255, 255)               # White text color
 }
 
-symbol_map = {
-    '⊞': '⊞',
-    '⊠': '⊠',    # Rewards
-    '⊖': '-',
-    '⊗': 'x',    # Traps
-    '⊕': '+',
-    '⊘': '/',    # Spring and Block traps
-    '★': '★',
-    'S': 'S'     # Treasure and start
-}
-
-def hex_to_pixel(row, col):
-    """Convert grid coordinates to pixel coordinates (180° flipped)"""
-    # Flip the coordinates for display to match the 180° flip
-    display_row = ROWS - 1 - row
-    display_col = COLS  - col
-    
-    hex_width = 2 * hex_radius * cos(pi/6)
-    hex_height = 2 * hex_radius 
-    
-    x = margin + display_col * hex_width
-    # Odd columns are offset down by half hex height (1-based indexing in matplotlib)
-    y_offset = 0 if (display_col + 1) % 2 == 1 else hex_height / 2  # Convert to 1-based for offset check
-    y = margin + display_row * hex_height + y_offset
-    return (x, y)
-
-def draw_hexagon(surface, center, size, color, symbol=''):
-    """Draw a hexagon with flat-top orientation"""
-    points = []
-    for i in range(6):
-        angle_deg = 60 * i  # Flat-top orientation (0° at top-right)
-        angle_rad = pi / 180 * angle_deg
-        x = center[0] + size * cos(angle_rad)
-        y = center[1] + size * sin(angle_rad)
-        points.append((x, y))
-    
-    pygame.draw.polygon(surface, color, points)
-    pygame.draw.polygon(surface, (0, 0, 0), points, 2)  # Black border
-    
-    # Draw symbol if provided
-    if symbol:
-        font = pygame.font.SysFont('Arial', 16, bold=True)
-        text_color = (255, 255, 255) if sum(color) < 400 else (0, 0, 0)
-        text = font.render(symbol, True, text_color)
-        text_rect = text.get_rect(center=center)
-        surface.blit(text, text_rect)
-
-def draw_grid():
-    """Draw the entire hexagonal grid (180° flipped)"""
-    screen.fill(BACKGROUND)
-    for i in range(ROWS):
-        for j in range(COLS):
-            center = hex_to_pixel(i, j)
-            sym = grid[i][j]
-            color = color_map.get(sym, (255, 255, 255))
-            symbol = symbol_map.get(sym, '')
-            draw_hexagon(screen, center, hex_radius, color, symbol)
-            
-            # Draw coordinates in original (unflipped) format
-            font = pygame.font.SysFont('Arial', 10)
-            orig_col = COLS - j
-            orig_row = ROWS - i
-            coord_text = font.render(f"{orig_col},{orig_row}", True, (100, 100, 100))
-            coord_rect = coord_text.get_rect(center=(center[0], center[1] + 15))
-            screen.blit(coord_text, coord_rect)
-
-def animate_path():
-    """Animate the path through the hexagonal grid"""
-    if not the_path:
-        print("No path to animate!")
-        # Still show the grid
-        draw_grid()
-        pygame.display.flip()
+class HexGrid:
+    # Hexagonal grid visualization system for treasure hunt world display.
+    def __init__(self, grid_data, hex_size=30):
+        # Initialize hexagonal grid renderer.
+        self.grid = grid_data
+        self.rows = len(grid_data)
+        self.cols = len(grid_data[0])
+        self.hex_size = hex_size
         
-        running = True
-        while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-            time.sleep(0.1)
-        return
+        # Calculate hexagon dimensions for flat-top orientation
+        self.hex_width = hex_size * 2
+        self.hex_height = hex_size * math.sqrt(3)
+        
+        # Set spacing between hexagons
+        self.horizontal_spacing = self.hex_width * 0.85
+        self.vertical_spacing = self.hex_height * 0.55
+        
+        # Center the entire grid within the display window
+        total_width = (self.cols - 1) * self.horizontal_spacing + self.hex_width
+        total_height = (self.rows - 1) * self.vertical_spacing + self.hex_height
+        
+        self.offset_x = (WINDOW_WIDTH - total_width) // 2
+        self.offset_y = (WINDOW_HEIGHT - total_height) // 2
+        
+    def hex_to_pixel(self, row, col):
+        # Convert grid coordinates to screen pixel coordinates.
+        x = self.offset_x + col * self.horizontal_spacing + self.hex_width // 2
+        y = self.offset_y + row * self.vertical_spacing + self.hex_height // 2
+        return int(x), int(y)
+    
+    def draw_hexagon(self, surface, center_x, center_y, color, border_color=None):
+        # Render a flat-top hexagon at specified center position.
+        points = []
+        for i in range(6):
+            angle = i * pi / 3
+            x = center_x + self.hex_size * cos(angle)
+            y = center_y + self.hex_size * sin(angle)
+            points.append((x, y))
+        
+        pygame.draw.polygon(surface, color, points)
+        border_col = border_color if border_color else (60, 60, 60)
+        pygame.draw.polygon(surface, border_col, points, 1)
+    
+    def get_cell_color(self, cell_value):
+        # Map cell values to their corresponding display colors.
+        color_map = {
+            1: COLORS['path'],
+            0: COLORS['blocked'],
+            'S': COLORS['start'],
+            'T': COLORS['treasure'],
+            'O': COLORS['obstacle']
+        }
+        
+        if cell_value in ['⊖', '⊕', '⊗', '⊘']:
+            return COLORS['trap']
+        elif cell_value in ['⊞', '⊠']:
+            return COLORS['reward']
+        
+        return color_map.get(cell_value, COLORS['path'])
+    
+    def draw_grid(self, surface, path=None, current_step=None, jump_moves=None):
+        # Render the complete hexagonal grid with path visualization.
+        visit_count = {}
+        current_pos = None
+        
+        if path and current_step is not None:
+            for i in range(current_step + 1):
+                if i < len(path):
+                    pos = path[i]
+                    visit_count[pos] = visit_count.get(pos, 0) + 1
+                    if i == current_step:
+                        current_pos = pos
+        
+        for row in range(self.rows):
+            for col in range(self.cols):
+                cell_value = self.grid[row][col]
+                
+                if cell_value == 0:
+                    continue
+                
+                center_x, center_y = self.hex_to_pixel(row, col)
+                color = self.get_cell_color(cell_value)
+                border_color = (100, 100, 100)
+                
+                if current_pos and (row, col) == current_pos:
+                    color = COLORS['current_path']
+                    border_color = (255, 255, 255)
+                elif path and (row, col) in visit_count:
+                    visits = visit_count[(row, col)]
+                    is_jump = False
+                    if jump_moves and current_step is not None:
+                        for i in range(min(current_step + 1, len(path) - 1)):
+                            if (path[i], path[i + 1]) in jump_moves and path[i + 1] == (row, col):
+                                is_jump = True
+                                break
+                    
+                    if visits > 1:
+                        color = COLORS['visited_multiple']
+                        border_color = (0, 50, 100)
+                    else:
+                        color = COLORS['visited_once']
+                        border_color = (50, 100, 200)
+                
+                self.draw_hexagon(surface, center_x, center_y, color, border_color)
+                
+                if cell_value in ['S', 'T', '⊖', '⊕', '⊗', '⊘', '⊞', '⊠']:
+                    try:
+                        font = pygame.font.Font(None, 28)
+                    except:
+                        font = pygame.font.SysFont('arial', 20)
+                    
+                    if current_pos and (row, col) == current_pos:
+                        text_color = (0, 0, 0)
+                    elif (row, col) in visit_count:
+                        text_color = (255, 255, 255)
+                    else:
+                        text_color = (0, 0, 0) if cell_value != 'S' else (255, 255, 255)
+                    
+                    display_text = str(cell_value)
+                    symbol_labels = {
+                        '⊖': 'T1',
+                        '⊕': 'T2',
+                        '⊗': 'T3',
+                        '⊘': 'T4',
+                        '⊞': 'R1',
+                        '⊠': 'R2'
+                    }
+                    display_text = symbol_labels.get(cell_value, str(cell_value))
+                    
+                    text = font.render(display_text, True, text_color)
+                    text_rect = text.get_rect(center=(center_x, center_y))
+                    surface.blit(text, text_rect)
+
+
+class TreasureHuntAStar:
+    """
+    A* pathfinding algorithm implementation for treasure hunt problem.
+    Modified to prioritize nearest treasure or reward, with treasure priority on ties.
+    """
+    def __init__(self, grid_data):
+        self.grid = grid_data
+        self.rows = len(grid_data)
+        self.cols = len(grid_data[0])
+        
+        self.start = None
+        self.treasures = []
+        self.rewards = []
+        
+        for i in range(self.rows):
+            for j in range(self.cols):
+                cell = self.grid[i][j]
+                if cell == 'S':
+                    self.start = (i, j)
+                elif cell == 'T':
+                    self.treasures.append((i, j))
+                elif cell in ['⊞', '⊠']:
+                    self.rewards.append(((i, j), cell))
+        
+        self.treasures = tuple(sorted(self.treasures))
+        self.rewards = tuple(sorted(self.rewards))
+        
+        self.directions = [
+            (-1, 0),   # Up
+            (1, 0),    # Down
+            (-1, -1),  # Up-Left
+            (-1, 1),   # Up-Right
+            (1, -1),   # Down-Left
+            (1, 1)     # Down-Right
+        ]
+        
+        self.jump_moves = set()
+        self.BASE_COST = 1.0
+    
+    def get_valid_moves(self, row, col):
+        valid_moves = []
+        for dr, dc in self.directions:
+            nr, nc = row + dr, col + dc
+            
+            if nr < 0 or nr >= self.rows or nc < 0 or nc >= self.cols:
+                continue
+            cell_value = self.grid[nr][nc]
+    
+            if (dr, dc) in [(-1, 0), (1, 0)]:
+                if cell_value == 0:
+                    jump_r, jump_c = nr + dr, nc + dc
+                    if (jump_r >= 0 and jump_r < self.rows and 
+                        jump_c >= 0 and jump_c < self.cols):
+                        jump_cell = self.grid[jump_r][jump_c]
+                        if jump_cell != 'O' and jump_cell != 0:
+                            valid_moves.append((jump_r, jump_c, True))
+                    continue
+                elif cell_value == 'O':
+                    continue
+                else:
+                    valid_moves.append((nr, nc, False))
+            
+            else:
+                if cell_value != 'O' and cell_value != 0:
+                    valid_moves.append((nr, nc, False))
+
+        return valid_moves
+        
+    def calculate_movement_cost(self, gravity_level, speed_level):
+        if speed_level >= 0:
+            step_multiplier = 2 ** speed_level
+        else:
+            step_multiplier = 1.0 / (2 ** abs(speed_level))
+        
+        return self.BASE_COST * (2 ** gravity_level) * step_multiplier
+    
+    def manhattan_distance(self, pos1, pos2):
+        """Calculate Manhattan distance between two positions"""
+        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
+    
+    def find_nearest_target(self, row, col, remaining_treasures, unused_rewards):
+        """Find the nearest treasure or reward, prioritizing treasure on ties"""
+        nearest_treasure = None
+        nearest_reward = None
+        min_treasure_dist = inf
+        min_reward_dist = inf
+        
+        # Find nearest treasure
+        for treasure in remaining_treasures:
+            dist = self.manhattan_distance((row, col), treasure)
+            if dist < min_treasure_dist:
+                min_treasure_dist = dist
+                nearest_treasure = treasure
+        
+        # Find nearest unused reward
+        for (reward_pos, reward_type) in unused_rewards:
+            dist = self.manhattan_distance((row, col), reward_pos)
+            if dist < min_reward_dist:
+                min_reward_dist = dist
+                nearest_reward = reward_pos
+        
+        # Choose target: treasure if closer or equal distance, otherwise reward
+        if nearest_treasure is not None and (nearest_reward is None or min_treasure_dist <= min_reward_dist):
+            return nearest_treasure, min_treasure_dist, 'treasure'
+        elif nearest_reward is not None:
+            return nearest_reward, min_reward_dist, 'reward'
+        else:
+            return None, inf, None
+    
+    def heuristic(self, row, col, remaining_treasures, unused_rewards):
+        """Modified heuristic to find distance to nearest treasure or reward"""
+        if not remaining_treasures and not unused_rewards:
+            return 0
+        
+        target, distance, target_type = self.find_nearest_target(row, col, remaining_treasures, unused_rewards)
+        
+        if target is None:
+            return 0
+        
+        return distance
+    
+    def solve(self):
+        self.jump_moves.clear()
+        
+        # Convert rewards to format that tracks unused rewards
+        unused_rewards = set()
+        for reward_pos, reward_type in self.rewards:
+            unused_rewards.add((reward_pos, reward_type))
+        
+        start_state = (self.start[0], self.start[1], self.treasures, 0, 0, frozenset(unused_rewards))
+        
+        open_heap = [(self.heuristic(self.start[0], self.start[1], self.treasures, unused_rewards), 
+                     0, start_state)]
+        
+        best_g_score = {start_state: 0}
+        parent = {start_state: None}
+        goal_state = None
+        
+        while open_heap:
+            f, g, state = heapq.heappop(open_heap)
+            row, col, remaining, grav_level, speed_level, available_rewards = state
+            
+            # Goal condition: all treasures collected
+            if not remaining:
+                goal_state = state
+                break
+            
+            if g > best_g_score.get(state, inf):
+                continue
+            
+            valid_moves = self.get_valid_moves(row, col)
+            
+            for nr, nc, is_jump in valid_moves:
+                new_grav, new_speed = grav_level, speed_level
+                new_remaining = remaining
+                new_available_rewards = available_rewards
+                
+                cell = self.grid[nr][nc]
+                
+                # Handle traps
+                if cell == '⊖':
+                    new_grav += 1
+                elif cell == '⊕':
+                    new_speed += 1
+                elif cell == '⊘':
+                    if remaining:  # Teleport trap only works if treasures remain
+                        continue
+                elif cell == '⊗':
+                    # Modified teleport trap behavior - move backwards 3 steps
+                    path_history = []
+                    current_state = state
+                    for _ in range(3):
+                        if current_state is None:
+                            break
+                        path_history.append((current_state[0], current_state[1]))
+                        current_state = parent.get(current_state)
+                    
+                    if len(path_history) >= 3:
+                        nr, nc = path_history[2]
+                        
+                        if (nr >= 0 and nr < self.rows and nc >= 0 and nc < self.cols and
+                            self.grid[nr][nc] != 'O' and self.grid[nr][nc] != 0):
+                            
+                            dest_cell = self.grid[nr][nc]
+                            if dest_cell == 'T' and (nr, nc) in new_remaining:
+                                rem_set = set(new_remaining)
+                                rem_set.remove((nr, nc))
+                                new_remaining = tuple(sorted(rem_set))
+                            elif dest_cell == '⊖':
+                                new_grav += 1
+                            elif dest_cell == '⊕':
+                                new_speed += 1
+                            elif dest_cell == '⊘':
+                                if new_remaining:
+                                    continue
+                            elif dest_cell == '⊞':
+                                reward_tuple = ((nr, nc), '⊞')
+                                if reward_tuple in new_available_rewards:
+                                    new_grav = max(0, new_grav - 1)
+                                    new_available_rewards = new_available_rewards - {reward_tuple}
+                            elif dest_cell == '⊠':
+                                reward_tuple = ((nr, nc), '⊠')
+                                if reward_tuple in new_available_rewards:
+                                    new_speed = max(0, new_speed - 1)
+                                    new_available_rewards = new_available_rewards - {reward_tuple}
+                        else:
+                            continue
+                    else:
+                        continue
+                
+                # Handle rewards
+                elif cell == '⊞':
+                    reward_tuple = ((nr, nc), '⊞')
+                    if reward_tuple in available_rewards:
+                        new_grav = max(0, new_grav - 1)
+                        new_available_rewards = available_rewards - {reward_tuple}
+                elif cell == '⊠':
+                    reward_tuple = ((nr, nc), '⊠')
+                    if reward_tuple in available_rewards:
+                        new_speed = max(0, new_speed - 1)
+                        new_available_rewards = available_rewards - {reward_tuple}
+                
+                # Handle treasure collection
+                if cell == 'T' and (nr, nc) in remaining:
+                    rem_set = set(remaining)
+                    rem_set.remove((nr, nc))
+                    new_remaining = tuple(sorted(rem_set))
+                
+                move_cost = self.calculate_movement_cost(grav_level, speed_level)
+                
+                if is_jump:
+                    self.jump_moves.add(((row, col), (nr, nc)))
+                
+                new_g = g + move_cost
+                new_state = (nr, nc, new_remaining, new_grav, new_speed, new_available_rewards)
+                
+                if new_g < best_g_score.get(new_state, inf):
+                    best_g_score[new_state] = new_g
+                    parent[new_state] = state
+                    h_score = self.heuristic(nr, nc, new_remaining, new_available_rewards)
+                    f_score = new_g + h_score
+                    
+                    heapq.heappush(open_heap, (f_score, new_g, new_state))
+        
+        if goal_state:
+            path = []
+            st = goal_state
+            while st:
+                path.append((st[0], st[1]))
+                st = parent.get(st)
+            path.reverse()
+            return path, best_g_score[goal_state]
+        
+        return None, None
+
+
+def main():
+    grid = [
+        [   0,   1,   0,   1,   0,   1,   0,   1,   0,   1   ],
+        [  'S',  0,   1,   0,  '⊞',  0,   1,   0,   1,   0   ],
+        [   0,  '⊕',  0,  '⊘',  0,   1,   0,   1,   0,   1   ],
+        [   1,   0,   1,   0,  'T',  0,  '⊗',  0,  'O',  0   ],
+        [   0,   1,   0,   1,   0,   1,   0,  '⊠',  0,   1   ],
+        [   1,   0,  'O',  0,  'O',  0,   1,   0,  '⊖',  0   ],
+        [   0,  '⊞',  0,  'O',  0,  '⊗',  0,  'T',  0,  'T'  ],
+        [  'O',  0,   1,   0,   1,   0,  'O',  0,   1,   0   ],
+        [   0,   1,   0,  'T',  0,   1,   0,  'O',  0,   1   ],
+        [   1,   0,  '⊕',  0,  'O',  0,  'O',  0,   1,   0   ],
+        [   0,   1,   0,   1,   0,  '⊠',  0,   1,   0,   1   ],
+        [   1,   0,   1,   0,   1,   0,   1,   0,   1,   0   ],
+    ]
+    
+    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+    pygame.display.set_caption("A* Treasure Hunt - Nearest Target Priority")
+    clock = pygame.time.Clock()
+    font = pygame.font.Font(None, 36)
+    
+    hex_grid = HexGrid(grid)
+    solver = TreasureHuntAStar(grid)
+
+    solution_path, total_cost = solver.solve()
+    
+    if solution_path:
+        print(f"SUCCESS! Collected all {len(solver.treasures)} treasures!")
+        print(f"Path length: {len(solution_path)}, Total cost: {total_cost:.2f}")
+        print("Path coordinates:", solution_path)
+    else:
+        print("FAILED! Could not collect all treasures - no valid path found!")
+    
+    current_step = 0
+    last_step_time = 0
+    step_delay = 500
+    auto_play = False
     
     running = True
-    path_index = 0
-    
-    while running and path_index < len(the_path):
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-                break
-                
-        if not running:
-            break
-            
-        # Draw the base grid
-        draw_grid()
-        
-        # Draw the path so far
-        current_path = the_path[:path_index+1]
-        if len(current_path) > 1:
-            path_points = [hex_to_pixel(r, c) for r, c in current_path]
-            pygame.draw.lines(screen, (255, 0, 0), False, path_points, 4)  # Red path
-        
-        # Highlight current position
-        current_r, current_c = current_path[-1]
-        center = hex_to_pixel(current_r, current_c)
-        pygame.draw.circle(screen, (255, 0, 0), (int(center[0]), int(center[1])), hex_radius//2)  # Red dot
-        
-        # Show step counter
-        font = pygame.font.SysFont('Arial', 24, bold=True)
-        step_text = font.render(f"Step: {path_index + 1}/{len(the_path)}", True, (0, 0, 0))
-        screen.blit(step_text, (10, 10))
-        
-        pygame.display.flip()
-        time.sleep(0.5)  # Slower animation for better visibility
-        path_index += 1
-    
-    # Show completion message
-    if the_path and running:
-        font = pygame.font.SysFont('Arial', 32, bold=True)
-        complete_text = font.render("Path Complete!", True, (0, 128, 0))
-        text_rect = complete_text.get_rect(center=(win_width//2, 50))
-        screen.blit(complete_text, text_rect)
-        pygame.display.flip()
-    
-    # Wait until window closed
     while running:
+        current_time = pygame.time.get_ticks()
+        
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-        time.sleep(0.1)
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_SPACE:
+                    auto_play = not auto_play
+                elif event.key == pygame.K_RIGHT and solution_path:
+                    current_step = min(current_step + 1, len(solution_path) - 1)
+                elif event.key == pygame.K_LEFT:
+                    current_step = max(current_step - 1, 0)
+                elif event.key == pygame.K_r:
+                    current_step = 0
+        
+        if auto_play and solution_path and current_time - last_step_time > step_delay:
+            if current_step < len(solution_path) - 1:
+                current_step += 1
+                last_step_time = current_time
+            else:
+                auto_play = False
+        
+        screen.fill(COLORS['background'])
+        hex_grid.draw_grid(screen, solution_path, current_step if solution_path else None, solver.jump_moves)
+        
+        if solution_path:
+            step_text = font.render(f"PATH: {current_step}/{len(solution_path) - 1}", True, COLORS['text'])
+            cost_text = font.render(f"COST: {total_cost:.1f}", True, COLORS['text'])
+            screen.blit(step_text, (10, 10))
+            screen.blit(cost_text, (10, 50))
+        
+        # Strategy info
+        strategy_text = pygame.font.Font(None, 28).render("Strategy: Nearest Target (Treasure Priority)", True, COLORS['text'])
+        screen.blit(strategy_text, (10, 90))
+        
+        legend_items = [
+            ("Start (S)", COLORS['start']),
+            ("Treasure (T)", COLORS['treasure']),
+            ("Traps (T1-T4)", COLORS['trap']),
+            ("Rewards (R1-R2)", COLORS['reward']),
+            ("Obstacle (O)", COLORS['obstacle']),
+        ]
+        
+        legend_x = WINDOW_WIDTH - 200
+        legend_y = 10
+        
+        for i, (name, color) in enumerate(legend_items):
+            pygame.draw.rect(screen, color, (legend_x, legend_y + i * 30, 20, 20))
+            text = pygame.font.Font(None, 24).render(name, True, COLORS['text'])
+            screen.blit(text, (legend_x + 30, legend_y + i * 30))
 
-# Run the animation
-animate_path()
-pygame.quit()
-sys.exit()
+        pygame.display.flip()
+        clock.tick(FPS)
+    
+    pygame.quit()
+
+if __name__ == "__main__":
+    main()
