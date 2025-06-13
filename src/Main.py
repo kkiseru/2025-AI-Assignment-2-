@@ -164,7 +164,7 @@ class HexGrid:
 class TreasureHuntAStar:
     """
     A* pathfinding algorithm implementation for treasure hunt problem.
-    Modified to prioritize nearest treasure or reward, with treasure priority on ties.
+    Modified to prioritize least number of steps rather than least cost.
     """
     def __init__(self, grid_data):
         self.grid = grid_data
@@ -212,7 +212,7 @@ class TreasureHuntAStar:
             if (dr, dc) in [(-1, 0), (1, 0)]:
                 if cell_value == 0:
                     jump_r, jump_c = nr + dr, nc + dc
-                    if (jump_r >= 0 and jump_r < self.rows and 
+                    if (jump_r >= 0 and jump_r < self.rows and
                         jump_c >= 0 and jump_c < self.cols):
                         jump_cell = self.grid[jump_r][jump_c]
                         if jump_cell != 'O' and jump_cell != 0:
@@ -228,8 +228,9 @@ class TreasureHuntAStar:
                     valid_moves.append((nr, nc, False))
 
         return valid_moves
-        
+    
     def calculate_movement_cost(self, gravity_level, speed_level):
+        # We'll keep the cost calculation but prioritize steps in our heuristic
         if speed_level >= 0:
             step_multiplier = 2 ** speed_level
         else:
@@ -237,78 +238,65 @@ class TreasureHuntAStar:
         
         return self.BASE_COST * (2 ** gravity_level) * step_multiplier
     
+    def estimate_trap_cost(self, trap_type, current_grav, current_speed):
+        """Estimate the cost impact of stepping on a trap"""
+        trap_effects = {
+            '⊖': (1, 0),    # Gravity increase
+            '⊕': (0, 1),    # Speed increase
+            '⊗': (0, 0),    # Teleport - hard to estimate
+            '⊘': (0, 0)     # Block if treasures remain
+        }
+        
+        grav_change, speed_change = trap_effects[trap_type]
+        new_grav = current_grav + grav_change
+        new_speed = current_speed + speed_change
+        
+        # Calculate how this affects future move costs
+        return self.calculate_movement_cost(new_grav, new_speed) * 3  # Estimate 3 moves affected
+
     def manhattan_distance(self, pos1, pos2):
         """Calculate Manhattan distance between two positions"""
         return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
     
-    def find_nearest_target(self, row, col, remaining_treasures, unused_rewards):
-        """Find the nearest treasure or reward, prioritizing treasure on ties"""
-        nearest_treasure = None
-        nearest_reward = None
-        min_treasure_dist = inf
-        min_reward_dist = inf
-        
-        # Find nearest treasure
+    def heuristic(self, row, col, remaining_treasures):
+        """Heuristic that prioritizes steps (distance to nearest treasure)"""
+        if not remaining_treasures:
+            return 0
+            
+        min_dist = inf
         for treasure in remaining_treasures:
             dist = self.manhattan_distance((row, col), treasure)
-            if dist < min_treasure_dist:
-                min_treasure_dist = dist
-                nearest_treasure = treasure
+            if dist < min_dist:
+                min_dist = dist
         
-        # Find nearest unused reward
-        for (reward_pos, reward_type) in unused_rewards:
-            dist = self.manhattan_distance((row, col), reward_pos)
-            if dist < min_reward_dist:
-                min_reward_dist = dist
-                nearest_reward = reward_pos
-        
-        # Choose target: treasure if closer or equal distance, otherwise reward
-        if nearest_treasure is not None and (nearest_reward is None or min_treasure_dist <= min_reward_dist):
-            return nearest_treasure, min_treasure_dist, 'treasure'
-        elif nearest_reward is not None:
-            return nearest_reward, min_reward_dist, 'reward'
-        else:
-            return None, inf, None
-    
-    def heuristic(self, row, col, remaining_treasures, unused_rewards):
-        """Modified heuristic to find distance to nearest treasure or reward"""
-        if not remaining_treasures and not unused_rewards:
-            return 0
-        
-        target, distance, target_type = self.find_nearest_target(row, col, remaining_treasures, unused_rewards)
-        
-        if target is None:
-            return 0
-        
-        return distance
+        return min_dist
     
     def solve(self):
         self.jump_moves.clear()
         
-        # Convert rewards to format that tracks unused rewards
-        unused_rewards = set()
-        for reward_pos, reward_type in self.rewards:
-            unused_rewards.add((reward_pos, reward_type))
+        # Start with initial gravity and speed
+        start_state = (self.start[0], self.start[1], self.treasures, 0, 0, 0)  # Added step count
         
-        start_state = (self.start[0], self.start[1], self.treasures, 0, 0, frozenset(unused_rewards))
-        
-        open_heap = [(self.heuristic(self.start[0], self.start[1], self.treasures, unused_rewards), 
-                     0, start_state)]
+        # Priority queue now prioritizes (steps + heuristic, steps, state)
+        open_heap = [(self.heuristic(self.start[0], self.start[1], self.treasures),
+                    0,  # steps
+                    start_state)]
         
         best_g_score = {start_state: 0}
+        best_steps = {start_state: 0}  # Track best steps to reach each state
         parent = {start_state: None}
+        state_history = {start_state: (0, 0)}  # Now only tracks (gravity, speed)
         goal_state = None
         
         while open_heap:
-            f, g, state = heapq.heappop(open_heap)
-            row, col, remaining, grav_level, speed_level, available_rewards = state
+            _, steps, state = heapq.heappop(open_heap)
+            row, col, remaining, grav_level, speed_level, _ = state
             
-            # Goal condition: all treasures collected
             if not remaining:
                 goal_state = state
                 break
             
-            if g > best_g_score.get(state, inf):
+            if steps > best_steps.get(state, inf):
                 continue
             
             valid_moves = self.get_valid_moves(row, col)
@@ -316,7 +304,7 @@ class TreasureHuntAStar:
             for nr, nc, is_jump in valid_moves:
                 new_grav, new_speed = grav_level, speed_level
                 new_remaining = remaining
-                new_available_rewards = available_rewards
+                new_steps = steps + 1
                 
                 cell = self.grid[nr][nc]
                 
@@ -326,7 +314,7 @@ class TreasureHuntAStar:
                 elif cell == '⊕':
                     new_speed += 1
                 elif cell == '⊘':
-                    if remaining:  # Teleport trap only works if treasures remain
+                    if remaining:
                         continue
                 elif cell == '⊗':
                     # Modified teleport trap behavior - move backwards 3 steps
@@ -357,65 +345,61 @@ class TreasureHuntAStar:
                                 if new_remaining:
                                     continue
                             elif dest_cell == '⊞':
-                                reward_tuple = ((nr, nc), '⊞')
-                                if reward_tuple in new_available_rewards:
-                                    new_grav = max(0, new_grav - 1)
-                                    new_available_rewards = new_available_rewards - {reward_tuple}
+                                new_grav -= 1  # Apply reward effect directly
                             elif dest_cell == '⊠':
-                                reward_tuple = ((nr, nc), '⊠')
-                                if reward_tuple in new_available_rewards:
-                                    new_speed = max(0, new_speed - 1)
-                                    new_available_rewards = new_available_rewards - {reward_tuple}
+                                new_speed = max(0, new_speed - 1)  # Apply reward effect directly
                         else:
                             continue
                     else:
                         continue
                 
-                # Handle rewards
+                # Apply rewards but don't let them create loops
                 elif cell == '⊞':
-                    reward_tuple = ((nr, nc), '⊞')
-                    if reward_tuple in available_rewards:
-                        new_grav = max(0, new_grav - 1)
-                        new_available_rewards = available_rewards - {reward_tuple}
+                    new_grav -= 1  # Apply every time
                 elif cell == '⊠':
-                    reward_tuple = ((nr, nc), '⊠')
-                    if reward_tuple in available_rewards:
-                        new_speed = max(0, new_speed - 1)
-                        new_available_rewards = available_rewards - {reward_tuple}
+                    new_speed = max(0, new_speed - 1)  # Apply every time
                 
-                # Handle treasure collection
+                # Treasure collection
                 if cell == 'T' and (nr, nc) in remaining:
                     rem_set = set(remaining)
                     rem_set.remove((nr, nc))
                     new_remaining = tuple(sorted(rem_set))
                 
-                move_cost = self.calculate_movement_cost(grav_level, speed_level)
+                new_state = (nr, nc, new_remaining, new_grav, new_speed, new_steps)
                 
-                if is_jump:
-                    self.jump_moves.add(((row, col), (nr, nc)))
-                
-                new_g = g + move_cost
-                new_state = (nr, nc, new_remaining, new_grav, new_speed, new_available_rewards)
-                
-                if new_g < best_g_score.get(new_state, inf):
-                    best_g_score[new_state] = new_g
+                # Only consider this state if it improves our step count
+                if new_steps < best_steps.get(new_state, inf):
+                    best_steps[new_state] = new_steps
+                    best_g_score[new_state] = best_g_score[state] + self.calculate_movement_cost(grav_level, speed_level)
                     parent[new_state] = state
-                    h_score = self.heuristic(nr, nc, new_remaining, new_available_rewards)
-                    f_score = new_g + h_score
+                    state_history[new_state] = (new_grav, new_speed)
+                    h_score = self.heuristic(nr, nc, new_remaining)
                     
-                    heapq.heappush(open_heap, (f_score, new_g, new_state))
+                    # Priority is now (steps + heuristic, steps, state)
+                    heapq.heappush(open_heap, (new_steps + h_score, new_steps, new_state))
         
         if goal_state:
             path = []
+            states = []
             st = goal_state
             while st:
                 path.append((st[0], st[1]))
+                states.append(st)
                 st = parent.get(st)
             path.reverse()
-            return path, best_g_score[goal_state]
+            states.reverse()
+            
+            # Extract gravity and speed at each step
+            step_states = []
+            for i, state in enumerate(states):
+                if i == 0:
+                    step_states.append((0, 0))  # Initial state
+                else:
+                    step_states.append(state_history[state])
+            
+            return path, best_g_score[goal_state], step_states
         
-        return None, None
-
+        return None, None, None
 
 def main():
     grid = [
@@ -434,14 +418,14 @@ def main():
     ]
     
     screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-    pygame.display.set_caption("A* Treasure Hunt - Nearest Target Priority")
+    pygame.display.set_caption("A* Treasure Hunt - Least Steps Priority")
     clock = pygame.time.Clock()
     font = pygame.font.Font(None, 36)
     
     hex_grid = HexGrid(grid)
     solver = TreasureHuntAStar(grid)
 
-    solution_path, total_cost = solver.solve()
+    solution_path, total_cost, step_states = solver.solve()
     
     if solution_path:
         print(f"SUCCESS! Collected all {len(solver.treasures)} treasures!")
@@ -484,13 +468,34 @@ def main():
         
         if solution_path:
             step_text = font.render(f"PATH: {current_step}/{len(solution_path) - 1}", True, COLORS['text'])
-            cost_text = font.render(f"COST: {total_cost:.1f}", True, COLORS['text'])
+            # Use precomputed states for accurate cost
+            current_cost = 0.0
+            for i in range(1, current_step + 1):
+                prev_grav, prev_speed = step_states[i-1]
+                move_cost = solver.calculate_movement_cost(prev_grav, prev_speed)
+                current_cost += move_cost
+            
+            cost_text = font.render(f"COST: {current_cost:.2f}", True, COLORS['text'])
             screen.blit(step_text, (10, 10))
             screen.blit(cost_text, (10, 50))
+            grav_text = font.render(f"GRAV: {step_states[current_step][0]}", True, COLORS['text'])
+            speed_text = font.render(f"SPEED: {step_states[current_step][1]}", True, COLORS['text'])
+            screen.blit(grav_text, (10, 125))
+            screen.blit(speed_text, (10, 165))
         
         # Strategy info
-        strategy_text = pygame.font.Font(None, 28).render("Strategy: Nearest Target (Treasure Priority)", True, COLORS['text'])
+        strategy_text = pygame.font.Font(None, 28).render("Strategy: A* Algorithm, Least Steps to Nearest Target (Treasure Priority)", True, COLORS['text'])
         screen.blit(strategy_text, (10, 90))
+        
+        instructions = [
+            "SPACE: Auto-play/Pause",
+            "LEFT/RIGHT ARROWS: Step through path",
+            "R: Reset to start"
+        ]
+
+        for i, instruction in enumerate(instructions):
+            text = pygame.font.Font(None, 24).render(instruction, True, COLORS['text'])
+            screen.blit(text, (10, WINDOW_HEIGHT - 100 + i * 25))
         
         legend_items = [
             ("Start (S)", COLORS['start']),
