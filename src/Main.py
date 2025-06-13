@@ -2,6 +2,7 @@ import pygame
 import heapq
 import math
 from math import inf, cos, sin, pi
+from itertools import permutations, combinations
 
 # Initialize Pygame for graphics rendering
 pygame.init()
@@ -161,10 +162,10 @@ class HexGrid:
                     surface.blit(text, text_rect)
 
 
-class TreasureHuntAStar:
+class TreasureHuntTSP:
     """
-    A* pathfinding algorithm implementation for treasure hunt problem.
-    Modified to prioritize nearest treasure or reward, with treasure priority on ties.
+    Reward-Aware TSP optimization for treasure hunt problem.
+    Pre-computes optimal route considering treasures and beneficial rewards.
     """
     def __init__(self, grid_data):
         self.grid = grid_data
@@ -173,7 +174,7 @@ class TreasureHuntAStar:
         
         self.start = None
         self.treasures = []
-        self.rewards = []
+        self.beneficial_rewards = []
         
         for i in range(self.rows):
             for j in range(self.cols):
@@ -182,11 +183,10 @@ class TreasureHuntAStar:
                     self.start = (i, j)
                 elif cell == 'T':
                     self.treasures.append((i, j))
-                elif cell in ['⊞', '⊠']:
-                    self.rewards.append(((i, j), cell))
-        
-        self.treasures = tuple(sorted(self.treasures))
-        self.rewards = tuple(sorted(self.rewards))
+                elif cell == '⊞':  # Gravity reducer - beneficial
+                    self.beneficial_rewards.append(((i, j), 'gravity'))
+                elif cell == '⊠':  # Speed reducer - beneficial
+                    self.beneficial_rewards.append(((i, j), 'speed'))
         
         self.directions = [
             (-1, 0),   # Up
@@ -199,6 +199,8 @@ class TreasureHuntAStar:
         
         self.jump_moves = set()
         self.BASE_COST = 1.0
+        self.distance_cache = {}
+        self.path_cache = {}
     
     def get_valid_moves(self, row, col):
         valid_moves = []
@@ -237,184 +239,196 @@ class TreasureHuntAStar:
         
         return self.BASE_COST * (2 ** gravity_level) * step_multiplier
     
-    def manhattan_distance(self, pos1, pos2):
-        """Calculate Manhattan distance between two positions"""
-        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
-    
-    def find_nearest_target(self, row, col, remaining_treasures, unused_rewards):
-        """Find the nearest treasure or reward, prioritizing treasure on ties"""
-        nearest_treasure = None
-        nearest_reward = None
-        min_treasure_dist = inf
-        min_reward_dist = inf
+    def find_shortest_path(self, start_pos, end_pos, start_gravity=0, start_speed=0, collected_rewards=None):
+        """Find shortest path between two points using A* with game mechanics"""
+        if collected_rewards is None:
+            collected_rewards = set()
         
-        # Find nearest treasure
-        for treasure in remaining_treasures:
-            dist = self.manhattan_distance((row, col), treasure)
-            if dist < min_treasure_dist:
-                min_treasure_dist = dist
-                nearest_treasure = treasure
+        cache_key = (start_pos, end_pos, start_gravity, start_speed, frozenset(collected_rewards))
+        if cache_key in self.distance_cache:
+            return self.distance_cache[cache_key], self.path_cache[cache_key]
         
-        # Find nearest unused reward
-        for (reward_pos, reward_type) in unused_rewards:
-            dist = self.manhattan_distance((row, col), reward_pos)
-            if dist < min_reward_dist:
-                min_reward_dist = dist
-                nearest_reward = reward_pos
+        open_heap = [(0, 0, start_pos[0], start_pos[1], start_gravity, start_speed, frozenset(collected_rewards))]
+        best_g_score = {}
+        parent = {}
         
-        # Choose target: treasure if closer or equal distance, otherwise reward
-        if nearest_treasure is not None and (nearest_reward is None or min_treasure_dist <= min_reward_dist):
-            return nearest_treasure, min_treasure_dist, 'treasure'
-        elif nearest_reward is not None:
-            return nearest_reward, min_reward_dist, 'reward'
-        else:
-            return None, inf, None
-    
-    def heuristic(self, row, col, remaining_treasures, unused_rewards):
-        """Modified heuristic to find distance to nearest treasure or reward"""
-        if not remaining_treasures and not unused_rewards:
-            return 0
-        
-        target, distance, target_type = self.find_nearest_target(row, col, remaining_treasures, unused_rewards)
-        
-        if target is None:
-            return 0
-        
-        return distance
-    
-    def solve(self):
-        self.jump_moves.clear()
-        
-        # Convert rewards to format that tracks unused rewards
-        unused_rewards = set()
-        for reward_pos, reward_type in self.rewards:
-            unused_rewards.add((reward_pos, reward_type))
-        
-        start_state = (self.start[0], self.start[1], self.treasures, 0, 0, frozenset(unused_rewards))
-        
-        open_heap = [(self.heuristic(self.start[0], self.start[1], self.treasures, unused_rewards), 
-                     0, start_state)]
-        
-        best_g_score = {start_state: 0}
-        parent = {start_state: None}
-        goal_state = None
+        start_state = (start_pos[0], start_pos[1], start_gravity, start_speed, frozenset(collected_rewards))
+        best_g_score[start_state] = 0
+        parent[start_state] = None
         
         while open_heap:
-            f, g, state = heapq.heappop(open_heap)
-            row, col, remaining, grav_level, speed_level, available_rewards = state
+            f, g, row, col, grav_level, speed_level, used_rewards = heapq.heappop(open_heap)
             
-            # Goal condition: all treasures collected
-            if not remaining:
-                goal_state = state
-                break
+            if (row, col) == end_pos:
+                # Reconstruct path
+                path = []
+                state = (row, col, grav_level, speed_level, used_rewards)
+                while state:
+                    path.append((state[0], state[1]))
+                    state = parent.get(state)
+                path.reverse()
+                
+                self.distance_cache[cache_key] = g
+                self.path_cache[cache_key] = path
+                return g, path
             
-            if g > best_g_score.get(state, inf):
+            current_state = (row, col, grav_level, speed_level, used_rewards)
+            if g > best_g_score.get(current_state, inf):
                 continue
             
             valid_moves = self.get_valid_moves(row, col)
             
             for nr, nc, is_jump in valid_moves:
                 new_grav, new_speed = grav_level, speed_level
-                new_remaining = remaining
-                new_available_rewards = available_rewards
+                new_used_rewards = used_rewards
                 
                 cell = self.grid[nr][nc]
                 
-                # Handle traps
+                # Handle game mechanics
                 if cell == '⊖':
                     new_grav += 1
                 elif cell == '⊕':
                     new_speed += 1
                 elif cell == '⊘':
-                    if remaining:  # Teleport trap only works if treasures remain
-                        continue
+                    continue  # Skip paths through this trap for simplicity
                 elif cell == '⊗':
-                    # Modified teleport trap behavior - move backwards 3 steps
-                    path_history = []
-                    current_state = state
-                    for _ in range(3):
-                        if current_state is None:
-                            break
-                        path_history.append((current_state[0], current_state[1]))
-                        current_state = parent.get(current_state)
-                    
-                    if len(path_history) >= 3:
-                        nr, nc = path_history[2]
-                        
-                        if (nr >= 0 and nr < self.rows and nc >= 0 and nc < self.cols and
-                            self.grid[nr][nc] != 'O' and self.grid[nr][nc] != 0):
-                            
-                            dest_cell = self.grid[nr][nc]
-                            if dest_cell == 'T' and (nr, nc) in new_remaining:
-                                rem_set = set(new_remaining)
-                                rem_set.remove((nr, nc))
-                                new_remaining = tuple(sorted(rem_set))
-                            elif dest_cell == '⊖':
-                                new_grav += 1
-                            elif dest_cell == '⊕':
-                                new_speed += 1
-                            elif dest_cell == '⊘':
-                                if new_remaining:
-                                    continue
-                            elif dest_cell == '⊞':
-                                reward_tuple = ((nr, nc), '⊞')
-                                if reward_tuple in new_available_rewards:
-                                    new_grav = max(0, new_grav - 1)
-                                    new_available_rewards = new_available_rewards - {reward_tuple}
-                            elif dest_cell == '⊠':
-                                reward_tuple = ((nr, nc), '⊠')
-                                if reward_tuple in new_available_rewards:
-                                    new_speed = max(0, new_speed - 1)
-                                    new_available_rewards = new_available_rewards - {reward_tuple}
-                        else:
-                            continue
-                    else:
-                        continue
-                
-                # Handle rewards
+                    continue  # Skip teleport traps for path computation
                 elif cell == '⊞':
-                    reward_tuple = ((nr, nc), '⊞')
-                    if reward_tuple in available_rewards:
+                    reward_key = (nr, nc)
+                    if reward_key not in used_rewards:
                         new_grav = max(0, new_grav - 1)
-                        new_available_rewards = available_rewards - {reward_tuple}
+                        new_used_rewards = used_rewards | {reward_key}
                 elif cell == '⊠':
-                    reward_tuple = ((nr, nc), '⊠')
-                    if reward_tuple in available_rewards:
+                    reward_key = (nr, nc)
+                    if reward_key not in used_rewards:
                         new_speed = max(0, new_speed - 1)
-                        new_available_rewards = available_rewards - {reward_tuple}
-                
-                # Handle treasure collection
-                if cell == 'T' and (nr, nc) in remaining:
-                    rem_set = set(remaining)
-                    rem_set.remove((nr, nc))
-                    new_remaining = tuple(sorted(rem_set))
+                        new_used_rewards = used_rewards | {reward_key}
                 
                 move_cost = self.calculate_movement_cost(grav_level, speed_level)
+                new_g = g + move_cost
                 
                 if is_jump:
                     self.jump_moves.add(((row, col), (nr, nc)))
                 
-                new_g = g + move_cost
-                new_state = (nr, nc, new_remaining, new_grav, new_speed, new_available_rewards)
+                new_state = (nr, nc, new_grav, new_speed, new_used_rewards)
                 
                 if new_g < best_g_score.get(new_state, inf):
                     best_g_score[new_state] = new_g
-                    parent[new_state] = state
-                    h_score = self.heuristic(nr, nc, new_remaining, new_available_rewards)
+                    parent[new_state] = current_state
+                    
+                    # Manhattan distance heuristic
+                    h_score = abs(nr - end_pos[0]) + abs(nc - end_pos[1])
                     f_score = new_g + h_score
                     
-                    heapq.heappush(open_heap, (f_score, new_g, new_state))
+                    heapq.heappush(open_heap, (f_score, new_g, nr, nc, new_grav, new_speed, new_used_rewards))
         
-        if goal_state:
-            path = []
-            st = goal_state
-            while st:
-                path.append((st[0], st[1]))
-                st = parent.get(st)
-            path.reverse()
-            return path, best_g_score[goal_state]
+        return inf, []
+    
+    def calculate_reward_benefit(self, reward_pos, reward_type, current_gravity, current_speed):
+        """Calculate the benefit of collecting a reward based on current state"""
+        if reward_type == 'gravity':
+            # Benefit increases with higher gravity levels
+            return max(0, current_gravity) * 0.5
+        elif reward_type == 'speed':
+            # Benefit increases with higher speed levels
+            return max(0, current_speed) * 0.3
+        return 0
+    
+    def solve_tsp_with_rewards(self):
+        """Solve TSP considering both treasures and beneficial rewards"""
+        print("Computing optimal route with Reward-Aware TSP...")
         
-        return None, None
+        # All mandatory targets (treasures)
+        mandatory_targets = self.treasures
+        
+        # All optional targets (beneficial rewards)
+        optional_targets = [pos for pos, _ in self.beneficial_rewards]
+        
+        best_cost = inf
+        best_route = None
+        best_path = None
+        
+        # Try different combinations of optional rewards
+        for r in range(len(optional_targets) + 1):
+            for reward_combo in combinations(optional_targets, r):
+                # Create full target list: treasures + selected rewards
+                all_targets = list(mandatory_targets) + list(reward_combo)
+                
+                # Try all permutations of this target combination
+                for perm in permutations(all_targets):
+                    route_cost = 0
+                    full_path = [self.start]
+                    current_pos = self.start
+                    current_gravity = 0
+                    current_speed = 0
+                    collected_rewards = set()
+                    
+                    # Calculate cost for this route
+                    valid_route = True
+                    for target in perm:
+                        cost, path = self.find_shortest_path(
+                            current_pos, target, current_gravity, current_speed, collected_rewards
+                        )
+                        
+                        if cost == inf:
+                            valid_route = False
+                            break
+                        
+                        route_cost += cost
+                        full_path.extend(path[1:])  # Skip first element to avoid duplication
+                        current_pos = target
+                        
+                        # Update state based on what we collected
+                        cell = self.grid[target[0]][target[1]]
+                        if cell == '⊞':
+                            current_gravity = max(0, current_gravity - 1)
+                            collected_rewards.add(target)
+                        elif cell == '⊠':
+                            current_speed = max(0, current_speed - 1)
+                            collected_rewards.add(target)
+                        elif cell == '⊖':
+                            current_gravity += 1
+                        elif cell == '⊕':
+                            current_speed += 1
+                    
+                    if valid_route and route_cost < best_cost:
+                        best_cost = route_cost
+                        best_route = perm
+                        best_path = full_path
+                        print(f"New best route found: cost={best_cost:.2f}, targets={len(perm)}")
+        
+        return best_path, best_cost, best_route
+    
+    def solve(self):
+        """Main solve method using TSP optimization"""
+        self.jump_moves.clear()
+        
+        # Use TSP optimization
+        path, cost, route = self.solve_tsp_with_rewards()
+        
+        if path:
+            print(f"Optimal route: {route}")
+            return path, cost
+        
+        # Fallback to simple approach if TSP fails
+        print("TSP optimization failed, using fallback...")
+        return self.solve_simple()
+    
+    def solve_simple(self):
+        """Simple fallback solution - just collect treasures in order"""
+        path = [self.start]
+        current_pos = self.start
+        total_cost = 0
+        
+        for treasure in self.treasures:
+            cost, segment = self.find_shortest_path(current_pos, treasure)
+            if cost == inf:
+                return None, None
+            total_cost += cost
+            path.extend(segment[1:])
+            current_pos = treasure
+        
+        return path, total_cost
 
 
 def main():
@@ -432,27 +446,29 @@ def main():
         [   0,   1,   0,   1,   0,  '⊠',  0,   1,   0,   1   ],
         [   1,   0,   1,   0,   1,   0,   1,   0,   1,   0   ],
     ]
+
+    
     
     screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-    pygame.display.set_caption("A* Treasure Hunt - Nearest Target Priority")
+    pygame.display.set_caption("A* Treasure Hunt - Reward-Aware TSP Optimization")
     clock = pygame.time.Clock()
     font = pygame.font.Font(None, 36)
     
     hex_grid = HexGrid(grid)
-    solver = TreasureHuntAStar(grid)
+    solver = TreasureHuntTSP(grid)
 
     solution_path, total_cost = solver.solve()
     
     if solution_path:
-        print(f"SUCCESS! Collected all {len(solver.treasures)} treasures!")
+        print(f"SUCCESS! Optimal route found!")
         print(f"Path length: {len(solution_path)}, Total cost: {total_cost:.2f}")
         print("Path coordinates:", solution_path)
     else:
-        print("FAILED! Could not collect all treasures - no valid path found!")
+        print("FAILED! Could not find a valid path!")
     
     current_step = 0
     last_step_time = 0
-    step_delay = 500
+    step_delay = 300  # Faster animation for longer optimal paths
     auto_play = False
     
     running = True
@@ -489,8 +505,22 @@ def main():
             screen.blit(cost_text, (10, 50))
         
         # Strategy info
-        strategy_text = pygame.font.Font(None, 28).render("Strategy: Nearest Target (Treasure Priority)", True, COLORS['text'])
+        strategy_text = pygame.font.Font(None, 28).render("Strategy: Reward-Aware TSP Optimization", True, COLORS['text'])
         screen.blit(strategy_text, (10, 90))
+        
+        # Controls info
+        controls_text = pygame.font.Font(None, 20).render("Controls: SPACE=Auto, LEFT/RIGHT=Step, R=Reset", True, COLORS['text'])
+        screen.blit(controls_text, (10, 120))
+        # Show control instructions
+        instructions = [
+            "SPACE: Auto-play/Pause",
+            "LEFT/RIGHT: Step through path",
+            "R: Reset to start"
+        ]
+        
+        for i, instruction in enumerate(instructions):
+            text = pygame.font.Font(None, 24).render(instruction, True, COLORS['text'])
+            screen.blit(text, (10, WINDOW_HEIGHT - 100 + i * 25))
         
         legend_items = [
             ("Start (S)", COLORS['start']),
