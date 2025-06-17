@@ -235,7 +235,7 @@ class TreasureHuntAStar:
                             continue
                 
                 if cell == '⊞': new_grav -= 1
-                elif cell == '⊠': new_speed = max(0, new_speed - 1)
+                elif cell == '⊠': new_speed -= 1
                 if cell == 'T' and (nr, nc) in remaining:
                     new_remaining = tuple(sorted(set(remaining) - {(nr, nc)}))
                 
